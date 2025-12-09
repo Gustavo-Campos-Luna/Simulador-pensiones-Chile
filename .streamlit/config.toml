@@ -1,0 +1,16 @@
+# Configuración del tema profesional
+[theme]
+primaryColor = "#1E3A8A"  # Azul corporativo
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#1E293B"
+font = "sans serif"
+
+[server]
+headless = true
+port = 8501
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
