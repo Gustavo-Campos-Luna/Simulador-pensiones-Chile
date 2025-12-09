@@ -1,0 +1,6 @@
+# Dependencias del sistema (si fueran necesarias)
+# Streamlit Cloud instala automáticamente lo básico
+# Descomenta si necesitas algo específico:
+
+# libpq-dev
+# build-essential
