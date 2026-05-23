@@ -1,316 +1,349 @@
 """
-Generador de Reportes PDF Profesionales
-Crea reportes detallados de simulaciones de pensión
+Generador de reportes PDF para el simulador de pensiones.
+
+Produce un informe estructurado con resumen ejecutivo, resultados
+principales, metricas financieras avanzadas, tabla de simulacion
+y aviso legal. Utiliza ReportLab para la composicion de paginas.
 """
 
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from io import BytesIO
 from datetime import datetime
 from typing import Dict
+
 import pandas as pd
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+
+# ---------------------------------------------------------------------------
+# Paleta corporativa
+# ---------------------------------------------------------------------------
+_AZUL = colors.HexColor("#1E3A8A")
+_AZUL_CLARO = colors.HexColor("#EFF6FF")
+_VERDE = colors.HexColor("#10B981")
+_VERDE_CLARO = colors.HexColor("#F0FDF4")
+_GRIS = colors.HexColor("#6B7280")
+_GRIS_CLARO = colors.HexColor("#F9FAFB")
+_BLANCO = colors.white
 
 
 class PDFReportGenerator:
-    """Generador de reportes PDF profesionales."""
+    """Generador de reportes PDF profesionales para simulaciones previsionales.
+
+    Genera un informe de pagina completa en formato carta con:
+    - Encabezado institucional con fecha de generacion
+    - Resumen de parametros de entrada
+    - Resultados de pension por modalidad
+    - Indicadores financieros avanzados (VPN, TIR, duracion, DV01)
+    - Muestra de la proyeccion año a año
+    - Aviso legal estandar
+    """
 
     def __init__(self):
-        """Inicializa el generador con estilos."""
-        self.styles = getSampleStyleSheet()
-        self._crear_estilos_personalizados()
-
-    def _crear_estilos_personalizados(self):
-        """Crea estilos personalizados para el PDF."""
-        # Título principal
-        self.styles.add(ParagraphStyle(
-            name='CustomTitle',
-            parent=self.styles['Heading1'],
-            fontSize=24,
-            textColor=colors.HexColor('#1E3A8A'),
-            spaceAfter=30,
-            alignment=TA_CENTER,
-            fontName='Helvetica-Bold'
-        ))
-
-        # Subtítulo
-        self.styles.add(ParagraphStyle(
-            name='CustomHeading',
-            parent=self.styles['Heading2'],
-            fontSize=16,
-            textColor=colors.HexColor('#1E3A8A'),
-            spaceAfter=12,
-            spaceBefore=12,
-            fontName='Helvetica-Bold'
-        ))
-
-        # Texto normal
-        self.styles.add(ParagraphStyle(
-            name='CustomBody',
-            parent=self.styles['Normal'],
-            fontSize=11,
-            alignment=TA_JUSTIFY,
-            spaceAfter=10
-        ))
-
-        # Disclaimer
-        self.styles.add(ParagraphStyle(
-            name='Disclaimer',
-            parent=self.styles['Normal'],
-            fontSize=9,
-            textColor=colors.grey,
-            alignment=TA_JUSTIFY,
-            leftIndent=20,
-            rightIndent=20
-        ))
+        self._estilos = getSampleStyleSheet()
+        self._registrar_estilos()
 
     def generar_reporte(self, resultados: Dict, parametros: Dict) -> BytesIO:
-        """
-        Genera un reporte PDF completo.
+        """Genera el reporte PDF completo y lo retorna en un buffer de bytes.
 
         Args:
-            resultados: Resultados de la simulación
-            parametros: Parámetros usados en la simulación
+            resultados: Diccionario de salida de PensionCalculator.calcular_pension_completa().
+            parametros: Diccionario de parametros de entrada.
 
         Returns:
-            BytesIO con el PDF generado
+            BytesIO posicionado en el inicio del PDF generado.
         """
         buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter,
-                              rightMargin=72, leftMargin=72,
-                              topMargin=72, bottomMargin=18)
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=0.85 * inch,
+            leftMargin=0.85 * inch,
+            topMargin=0.85 * inch,
+            bottomMargin=0.6 * inch,
+        )
 
-        # Contenido del reporte
-        story = []
+        contenido = []
+        contenido += self._seccion_encabezado()
+        contenido += self._seccion_parametros(parametros, resultados)
+        contenido += self._seccion_resultados(resultados)
+        contenido += self._seccion_metricas(resultados)
+        contenido += self._seccion_tabla(resultados)
+        contenido.append(PageBreak())
+        contenido += self._seccion_aviso_legal()
 
-        # Encabezado
-        story.extend(self._crear_encabezado())
-
-        # Resumen ejecutivo
-        story.extend(self._crear_resumen_ejecutivo(resultados, parametros))
-
-        # Resultados principales
-        story.extend(self._crear_resultados_principales(resultados))
-
-        # Métricas financieras
-        story.extend(self._crear_metricas_financieras(resultados))
-
-        # Tabla de simulación (primeros y últimos años)
-        story.extend(self._crear_tabla_simulacion(resultados))
-
-        # Disclaimers y notas legales
-        story.append(PageBreak())
-        story.extend(self._crear_disclaimers())
-
-        # Generar PDF
-        doc.build(story)
+        doc.build(contenido)
         buffer.seek(0)
         return buffer
 
-    def _crear_encabezado(self) -> list:
-        """Crea el encabezado del reporte."""
+    # ------------------------------------------------------------------
+    # Secciones del reporte
+    # ------------------------------------------------------------------
+
+    def _seccion_encabezado(self) -> list:
         elementos = []
-
-        # Título
-        titulo = Paragraph(
-            "<b>Reporte de Simulación de Pensión</b>",
-            self.styles['CustomTitle']
-        )
-        elementos.append(titulo)
-
-        # Fecha
-        fecha = Paragraph(
-            f"<i>Generado: {datetime.now().strftime('%d de %B de %Y, %H:%M')}</i>",
-            self.styles['CustomBody']
-        )
-        elementos.append(fecha)
-        elementos.append(Spacer(1, 20))
-
+        elementos.append(Paragraph(
+            "Reporte de Simulacion Previsional",
+            self._estilos["Titulo"],
+        ))
+        elementos.append(Paragraph(
+            f"Generado el {datetime.now().strftime('%d/%m/%Y a las %H:%M')} "
+            "— Herramienta de analisis educativo",
+            self._estilos["Subtitulo"],
+        ))
+        elementos.append(Spacer(1, 16))
         return elementos
 
-    def _crear_resumen_ejecutivo(self, resultados: Dict, parametros: Dict) -> list:
-        """Crea el resumen ejecutivo."""
-        elementos = []
+    def _seccion_parametros(self, parametros: Dict, resultados: Dict) -> list:
+        elementos = [Paragraph("Parametros de la simulacion", self._estilos["Seccion"])]
 
-        # Título de sección
-        elementos.append(Paragraph("<b>Resumen Ejecutivo</b>", self.styles['CustomHeading']))
-
-        # Datos del simulador
-        datos = [
-            ["<b>Parámetro</b>", "<b>Valor</b>"],
-            ["Edad Actual", f"{parametros.get('edad_actual', 'N/A')} años"],
-            ["Edad de Jubilación", f"{parametros.get('edad_jubilacion', 'N/A')} años"],
-            ["Esperanza de Vida", f"{parametros.get('esperanza_vida', 'N/A')} años"],
-            ["Años de Cotización", f"{resultados.get('anos_cotizacion', 'N/A')} años"],
-            ["Ingreso Mensual", f"${parametros.get('ingreso_mensual', 0):,.0f}"],
-            ["Rentabilidad Esperada", f"{parametros.get('rentabilidad_nominal', 0):.1f}%"],
-            ["Inflación Esperada", f"{parametros.get('inflacion_esperada', 0):.1f}%"],
+        filas = [
+            ["Parametro", "Valor"],
+            ["Edad actual", f"{parametros.get('edad_actual', '—')} anos"],
+            ["Edad de jubilacion", f"{parametros.get('edad_jubilacion', '—')} anos"],
+            ["Esperanza de vida", f"{parametros.get('esperanza_vida', '—')} anos"],
+            ["Anos de acumulacion", f"{resultados.get('anos_cotizacion', '—')} anos"],
+            ["Anos efectivos (sin lagunas)", f"{resultados.get('anos_cotizacion_efectivos', '—')} anos"],
+            ["Ingreso mensual inicial", f"${parametros.get('ingreso_mensual', 0):,.0f}".replace(",", ".")],
+            ["Rentabilidad nominal anual", f"{parametros.get('rentabilidad_nominal', 0):.1f} %"],
+            ["Inflacion anual esperada", f"{parametros.get('inflacion_esperada', 0):.1f} %"],
+            ["AFP seleccionada", parametros.get("afp", "—")],
         ]
 
-        tabla = Table(datos, colWidths=[3*inch, 2.5*inch])
-        tabla.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1E3A8A')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')])
-        ]))
-
-        elementos.append(tabla)
-        elementos.append(Spacer(1, 20))
-
+        elementos.append(self._tabla(filas, col_widths=[3.2 * inch, 2.5 * inch], header_color=_AZUL))
+        elementos.append(Spacer(1, 16))
         return elementos
 
-    def _crear_resultados_principales(self, resultados: Dict) -> list:
-        """Crea la sección de resultados principales."""
-        elementos = []
+    def _seccion_resultados(self, resultados: Dict) -> list:
+        elementos = [Paragraph("Resultados principales", self._estilos["Seccion"])]
 
-        elementos.append(Paragraph("<b>Resultados Principales</b>", self.styles['CustomHeading']))
-
-        datos = [
-            ["<b>Métrica</b>", "<b>Valor</b>"],
-            ["Saldo Final Acumulado", f"${resultados.get('saldo_final_nominal', 0):,.0f}"],
-            ["Pensión Retiro Programado", f"${resultados.get('pension_rp_nominal', 0):,.0f}/mes"],
-            ["Pensión Renta Vitalicia", f"${resultados.get('pension_rv_nominal', 0):,.0f}/mes"],
-            ["Tasa de Reemplazo (RP)", f"{resultados.get('tasa_reemplazo_rp', 0):.1f}%"],
-            ["Tasa de Reemplazo (RV)", f"{resultados.get('tasa_reemplazo_rv', 0):.1f}%"],
-            ["Último Sueldo", f"${resultados.get('ultimo_sueldo', 0):,.0f}/mes"],
+        filas = [
+            ["Metrica", "Valor"],
+            ["Saldo final acumulado (nominal)", f"${resultados.get('saldo_final_nominal', 0):,.0f}".replace(",", ".")],
+            ["Saldo final acumulado (real CLP constantes)", f"${resultados.get('saldo_final_real', 0):,.0f}".replace(",", ".")],
+            ["Pension mensual — Retiro Programado", f"${resultados.get('pension_rp_nominal', 0):,.0f}/mes".replace(",", ".")],
+            ["Pension mensual — Renta Vitalicia", f"${resultados.get('pension_rv_nominal', 0):,.0f}/mes".replace(",", ".")],
+            ["Pension con PBS (RP)", f"${resultados.get('pension_rp_con_pbs', 0):,.0f}/mes".replace(",", ".")],
+            ["Tasa de reemplazo — Retiro Programado", f"{resultados.get('tasa_reemplazo_rp', 0):.1f} %"],
+            ["Tasa de reemplazo — Renta Vitalicia", f"{resultados.get('tasa_reemplazo_rv', 0):.1f} %"],
+            ["Tasa de reemplazo real", f"{resultados.get('tasa_reemplazo_real', 0):.1f} %"],
+            ["Ultimo sueldo proyectado", f"${resultados.get('ultimo_sueldo', 0):,.0f}/mes".replace(",", ".")],
         ]
 
-        tabla = Table(datos, colWidths=[3.5*inch, 2*inch])
-        tabla.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10B981')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('FONTSIZE', (0, 1), (-1, -1), 11),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F0FDF4')])
-        ]))
+        elementos.append(self._tabla(filas, col_widths=[3.8 * inch, 2.2 * inch], header_color=_VERDE))
 
-        elementos.append(tabla)
-        elementos.append(Spacer(1, 20))
-
-        # Interpretación
-        tasa_reemplazo = resultados.get('tasa_reemplazo_rp', 0)
-        if tasa_reemplazo >= 70:
-            interpretacion = "✓ <b>Excelente:</b> Su pensión representa un alto porcentaje de su último sueldo."
-        elif tasa_reemplazo >= 50:
-            interpretacion = "⚠ <b>Aceptable:</b> Su pensión es moderada. Considere ahorros adicionales."
+        tasa = resultados.get("tasa_reemplazo_rp", 0)
+        if tasa >= 70:
+            evaluacion = "La pension proyectada supera el objetivo del 70 % recomendado por la OCDE."
+        elif tasa >= 50:
+            evaluacion = "La pension proyectada es moderada. Se recomienda evaluar ahorro adicional (APV)."
         else:
-            interpretacion = "✗ <b>Baja:</b> Su pensión será significativamente menor a su sueldo. Se recomienda aumentar cotizaciones."
+            evaluacion = (
+                "La pension proyectada es significativamente inferior al ultimo sueldo. "
+                "Se sugiere incrementar cotizaciones voluntarias o extender el periodo de acumulacion."
+            )
 
-        elementos.append(Paragraph(interpretacion, self.styles['CustomBody']))
-        elementos.append(Spacer(1, 20))
-
+        elementos.append(Spacer(1, 8))
+        elementos.append(Paragraph(evaluacion, self._estilos["Cuerpo"]))
+        elementos.append(Spacer(1, 16))
         return elementos
 
-    def _crear_metricas_financieras(self, resultados: Dict) -> list:
-        """Crea la sección de métricas financieras avanzadas."""
-        elementos = []
+    def _seccion_metricas(self, resultados: Dict) -> list:
+        elementos = [Paragraph("Metricas financieras avanzadas", self._estilos["Seccion"])]
 
-        elementos.append(Paragraph("<b>Métricas Financieras Avanzadas</b>", self.styles['CustomHeading']))
-
-        datos = [
-            ["<b>Métrica</b>", "<b>Valor</b>"],
-            ["Valor Presente Neto (VPN)", f"${resultados.get('vpn_cotizaciones', 0):,.0f}"],
-            ["TIR de Cotizaciones", f"{resultados.get('tir_cotizaciones', 0):.2f}%"],
-            ["Rentabilidad Real", f"{resultados.get('rentabilidad_real', 0):.2f}%"],
-            ["Valor Presente Pensión", f"${resultados.get('vp_pension_total', 0):,.0f}"],
+        filas = [
+            ["Metrica", "Valor", "Descripcion"],
+            [
+                "VPN cotizaciones",
+                f"${resultados.get('vpn_cotizaciones', 0):,.0f}".replace(",", "."),
+                "Valor presente de la corriente de cotizaciones",
+            ],
+            [
+                "TIR cotizaciones",
+                f"{resultados.get('tir_cotizaciones', 0):.2f} %",
+                "Retorno efectivo de la inversion previsional",
+            ],
+            [
+                "Rentabilidad real (Fisher)",
+                f"{resultados.get('rentabilidad_real', 0):.2f} %",
+                "Tasa real = (1+nom)/(1+inf) - 1",
+            ],
+            [
+                "VP total de pensiones",
+                f"${resultados.get('vp_pension_total', 0):,.0f}".replace(",", "."),
+                "Valor presente de la corriente de pensiones futuras",
+            ],
+            [
+                "Duracion de Macaulay",
+                f"{resultados.get('duracion_macaulay_anos', 0):.1f} anos",
+                "Sensibilidad del pasivo a variaciones de tasa (ALM)",
+            ],
+            [
+                "DV01 del pasivo",
+                f"${resultados.get('dv01_clp', 0):,.0f}".replace(",", "."),
+                "Cambio en VP ante 1 punto base de variacion en tasa",
+            ],
         ]
 
-        tabla = Table(datos, colWidths=[3.5*inch, 2*inch])
+        elementos.append(
+            self._tabla(
+                filas,
+                col_widths=[1.8 * inch, 1.6 * inch, 2.9 * inch],
+                header_color=_GRIS,
+            )
+        )
+        elementos.append(Spacer(1, 16))
+        return elementos
+
+    def _seccion_tabla(self, resultados: Dict) -> list:
+        elementos = [Paragraph("Proyeccion año a año (muestra)", self._estilos["Seccion"])]
+
+        df: pd.DataFrame = resultados.get("simulacion_anual")
+        if df is None or df.empty:
+            return elementos
+
+        muestra = pd.concat([df.head(5), df.tail(5)]).drop_duplicates()
+
+        encabezado = ["Ano", "Edad", "Ingreso mensual", "Cotizacion anual", "Saldo nominal", "Laguna"]
+        filas = [encabezado]
+        for _, row in muestra.iterrows():
+            filas.append([
+                str(int(row["ano"])),
+                str(int(row["edad"])),
+                f"${row['ingreso_mensual']:,.0f}".replace(",", "."),
+                f"${row['cotizacion_anual']:,.0f}".replace(",", "."),
+                f"${row['saldo_nominal']:,.0f}".replace(",", "."),
+                "Si" if row["tiene_laguna"] else "No",
+            ])
+
+        elementos.append(
+            self._tabla(
+                filas,
+                col_widths=[0.6 * inch, 0.6 * inch, 1.4 * inch, 1.4 * inch, 1.5 * inch, 0.7 * inch],
+                header_color=_GRIS,
+                font_size_body=8,
+            )
+        )
+        return elementos
+
+    def _seccion_aviso_legal(self) -> list:
+        elementos = [Paragraph("Aviso legal", self._estilos["Seccion"])]
+
+        texto = (
+            "Este reporte tiene caracter estrictamente educativo e informativo. "
+            "Los resultados son estimaciones basadas en los supuestos ingresados y "
+            "no constituyen asesoria financiera, previsional ni recomendacion de inversion. "
+            "Esta herramienta no se encuentra registrada ni regulada por la Comision para "
+            "el Mercado Financiero (CMF).<br/><br/>"
+            "La rentabilidad pasada no garantiza rentabilidad futura. Las proyecciones "
+            "asumen condiciones de mercado y legislativas estables, lo cual no puede "
+            "garantizarse. Se recomienda complementar el analisis con un asesor previsional "
+            "certificado antes de tomar decisiones de inversion o planificacion.<br/><br/>"
+            "Fuentes: Banco Central de Chile, Superintendencia de Pensiones, CMF, INE."
+        )
+        elementos.append(Paragraph(texto, self._estilos["Legal"]))
+        return elementos
+
+    # ------------------------------------------------------------------
+    # Utilidades de composicion
+    # ------------------------------------------------------------------
+
+    def _tabla(
+        self,
+        filas: list,
+        col_widths: list,
+        header_color: colors.Color = _AZUL,
+        font_size_body: int = 9,
+    ) -> Table:
+        """Crea una tabla con estilo corporativo estandar."""
+        paragrafos = []
+        for i, fila in enumerate(filas):
+            estilo = "TablaEncabezado" if i == 0 else "TablaCuerpo"
+            paragrafos.append([Paragraph(str(celda), self._estilos[estilo]) for celda in fila])
+
+        tabla = Table(paragrafos, colWidths=col_widths)
         tabla.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3B82F6')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#EFF6FF')])
+            ("BACKGROUND", (0, 0), (-1, 0), header_color),
+            ("TEXTCOLOR", (0, 0), (-1, 0), _BLANCO),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE", (0, 1), (-1, -1), font_size_body),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [_BLANCO, _GRIS_CLARO]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ]))
+        return tabla
 
-        elementos.append(tabla)
-        elementos.append(Spacer(1, 20))
-
-        return elementos
-
-    def _crear_tabla_simulacion(self, resultados: Dict) -> list:
-        """Crea tabla con muestra de la simulación."""
-        elementos = []
-
-        elementos.append(Paragraph("<b>Detalle de Simulación (Muestra)</b>", self.styles['CustomHeading']))
-
-        df = resultados.get('simulacion_anual')
-        if df is not None and len(df) > 0:
-            # Mostrar primeros 5 y últimos 5 años
-            df_muestra = pd.concat([df.head(5), df.tail(5)])
-
-            datos = [["Año", "Edad", "Ingreso", "Cotización", "Saldo"]]
-
-            for _, row in df_muestra.iterrows():
-                datos.append([
-                    str(row['ano']),
-                    str(row['edad']),
-                    f"${row['ingreso_mensual']:,.0f}",
-                    f"${row['cotizacion_anual']:,.0f}",
-                    f"${row['saldo_nominal']:,.0f}"
-                ])
-
-            tabla = Table(datos, colWidths=[0.7*inch, 0.7*inch, 1.5*inch, 1.5*inch, 1.8*inch])
-            tabla.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6B7280')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('FONTSIZE', (0, 1), (-1, -1), 8),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F9FAFB')])
-            ]))
-
-            elementos.append(tabla)
-
-        return elementos
-
-    def _crear_disclaimers(self) -> list:
-        """Crea la sección de disclaimers legales."""
-        elementos = []
-
-        elementos.append(Paragraph("<b>Información Legal y Disclaimers</b>", self.styles['CustomHeading']))
-
-        disclaimer_text = """
-        <b>IMPORTANTE - LEA CUIDADOSAMENTE:</b><br/><br/>
-
-        Este reporte es una <b>estimación</b> basada en los parámetros ingresados y <b>no constituye
-        asesoría financiera profesional</b>. Los resultados son proyecciones que dependen de múltiples
-        variables que pueden cambiar en el futuro.<br/><br/>
-
-        <b>Consideraciones:</b><br/>
-        • La rentabilidad futura no está garantizada y puede variar significativamente<br/>
-        • No se consideran cambios en la legislación previsional<br/>
-        • Los cálculos asumen condiciones de mercado estables<br/>
-        • Las cifras no incluyen impuestos adicionales que puedan aplicar<br/>
-        • Se recomienda consultar con un asesor financiero certificado antes de tomar decisiones<br/><br/>
-
-        <b>Fuentes de datos:</b> Banco Central de Chile, Superintendencia de Pensiones, CMF.<br/><br/>
-
-        Este simulador es una herramienta educativa para fines informativos.
-        """
-
-        elementos.append(Paragraph(disclaimer_text, self.styles['Disclaimer']))
-
-        return elementos
+    def _registrar_estilos(self) -> None:
+        """Registra los estilos personalizados del reporte."""
+        self._estilos.add(ParagraphStyle(
+            "Titulo",
+            parent=self._estilos["Heading1"],
+            fontSize=20,
+            textColor=_AZUL,
+            alignment=TA_CENTER,
+            spaceAfter=6,
+            fontName="Helvetica-Bold",
+        ))
+        self._estilos.add(ParagraphStyle(
+            "Subtitulo",
+            parent=self._estilos["Normal"],
+            fontSize=9,
+            textColor=_GRIS,
+            alignment=TA_CENTER,
+            spaceAfter=12,
+        ))
+        self._estilos.add(ParagraphStyle(
+            "Seccion",
+            parent=self._estilos["Heading2"],
+            fontSize=13,
+            textColor=_AZUL,
+            spaceAfter=8,
+            spaceBefore=14,
+            fontName="Helvetica-Bold",
+        ))
+        self._estilos.add(ParagraphStyle(
+            "Cuerpo",
+            parent=self._estilos["Normal"],
+            fontSize=10,
+            alignment=TA_JUSTIFY,
+            spaceAfter=8,
+        ))
+        self._estilos.add(ParagraphStyle(
+            "Legal",
+            parent=self._estilos["Normal"],
+            fontSize=8,
+            textColor=_GRIS,
+            alignment=TA_JUSTIFY,
+            leftIndent=12,
+            rightIndent=12,
+            spaceAfter=8,
+        ))
+        self._estilos.add(ParagraphStyle(
+            "TablaEncabezado",
+            parent=self._estilos["Normal"],
+            fontSize=10,
+            textColor=_BLANCO,
+            fontName="Helvetica-Bold",
+        ))
+        self._estilos.add(ParagraphStyle(
+            "TablaCuerpo",
+            parent=self._estilos["Normal"],
+            fontSize=9,
+        ))

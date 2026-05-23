@@ -1,1 +1,1 @@
-# Simulador Profesional de Pensiones Chile
+# Simulador de Pensiones Chile

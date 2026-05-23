@@ -1,10 +1,28 @@
+# Simulador de Pensiones Chile — dependencias Python
+# Instalar con: pip install -r requirements.txt
+
+# Framework web
 streamlit>=1.28.0
-pandas>=2.0.0
+
+# Calculo numerico
 numpy>=1.24.0
 scipy>=1.11.0
+
+# Manipulacion de datos
+pandas>=2.0.0
+
+# Visualizaciones interactivas
 plotly>=5.17.0
+
+# Generacion de reportes PDF
 reportlab>=4.0.0
-requests>=2.31.0
 pillow>=10.0.0
+
+# Exportacion a Excel
 openpyxl>=3.1.0
+
+# Cliente HTTP (APIs externas: UF, inflacion)
+requests>=2.31.0
+
+# Utilidades de fecha
 python-dateutil>=2.8.0
