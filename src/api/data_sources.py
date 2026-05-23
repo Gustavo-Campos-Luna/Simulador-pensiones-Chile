@@ -35,9 +35,8 @@ _TIMEOUT = 10  # segundos
 
 # Series BCCh — verificar vigencia en si3.bcentral.cl/siete/secure/cuadros/home.aspx
 _SERIES: Dict[str, str] = {
-    "uf":            "F073.UFF.PRE.Z.D",      # UF, valor diario
-    "ipc":           "F074.IPC.VAR.Z.M.T",    # IPC, variacion mensual (%)
-    "sueldo_minimo": "F054.SMA.SMN.Z.M.TF.V", # Sueldo minimo nominal mensual
+    "uf":  "F073.UFF.PRE.Z.D",        # UF, valor diario
+    "ipc": "F074.IPC.VAR.Z.EP23.C.M", # IPC General, variacion mensual, serie empalmada base 2023=100, desde 2010
 }
 
 _CREDENCIALES_INSTRUCCIONES = (
@@ -162,7 +161,7 @@ class DataFetcher:
     def obtener_inflacion_anual(self, anos: int = 10) -> Dict[int, float]:
         """Inflacion anual compuesta calculada desde el IPC mensual BCCh.
 
-        Fuente: serie F074.IPC.VAR.Z.M.T
+        Fuente: serie F074.IPC.VAR.Z.EP23.C.M (empalmada base 2023=100, desde 2010)
 
         Formula: inf_anual_t = prod(1 + ipc_mes/100 for mes in t) - 1
 
@@ -280,50 +279,9 @@ class DataFetcher:
         return round(sum(valores) / len(valores), 1)
 
     # ------------------------------------------------------------------
-    # Sueldo minimo
-    # ------------------------------------------------------------------
-
-    def obtener_sueldo_minimo(self) -> float:
-        """Sueldo minimo vigente desde BCCh (serie F054.SMA.SMN.Z.M.TF.V).
-
-        Returns:
-            Sueldo minimo en CLP.
-
-        Raises:
-            EnvironmentError: Si las credenciales no estan configuradas.
-            ValueError: Si la serie no retorna datos validos.
-            requests.HTTPError: Si la API retorna un error HTTP.
-        """
-        clave = "sueldo_minimo"
-        if clave in self._cache:
-            return self._cache[clave]  # type: ignore[return-value]
-
-        self._verificar_credenciales()
-
-        hoy = datetime.now().date()
-        hace_un_ano = hoy - timedelta(days=365)
-        params = {
-            "user":       self._bcentral_user,
-            "pass":       self._bcentral_pass,
-            "function":   "GetSeries",
-            "timeseries": _SERIES["sueldo_minimo"],
-            "startdate":  hace_un_ano.strftime("%Y-%m-%d"),
-            "enddate":    hoy.strftime("%Y-%m-%d"),
-            "format":     "json",
-        }
-        data = self._get_bcentral(params)
-        serie = data["Series"]["Obs"]
-        if not serie:
-            raise ValueError("BCCh no retorno observaciones para la serie sueldo minimo.")
-
-        ultimo = sorted(serie, key=lambda x: x["indexDateString"], reverse=True)[0]
-        valor = float(ultimo["value"].replace(",", "."))
-        logger.info("Sueldo minimo obtenido desde BCCh: %.0f CLP", valor)
-        self._cache[clave] = valor
-        return valor
-
-    # ------------------------------------------------------------------
-    # Datos regulados (constantes auditadas — fuente SP Pensiones)
+    # Datos regulados (constantes auditadas — fuentes oficiales)
+    # El BCCh no publica sueldo minimo via API; es un valor legal fijado
+    # por decreto. Fuente: Ministerio del Trabajo y Prevision Social.
     # ------------------------------------------------------------------
 
     def obtener_comisiones_afp(self) -> Dict[str, float]:
@@ -362,7 +320,7 @@ class DataFetcher:
 
         Returns:
             Dict con uf, inflacion_anual, inflacion_promedio, comisiones_afp,
-            rentabilidades_fondos, pbs, topes, sueldo_minimo y fecha.
+            rentabilidades_fondos, pbs, topes y fecha.
 
         Raises:
             EnvironmentError: Si las credenciales BCCh no estan configuradas.
@@ -378,7 +336,6 @@ class DataFetcher:
             "pbs":                  self.obtener_pension_basica_solidaria(),
             "tope_imponible_uf":    self.obtener_tope_imponible(en_uf=True),
             "tope_imponible_clp":   self.obtener_tope_imponible(en_uf=False),
-            "sueldo_minimo":        self.obtener_sueldo_minimo(),
             "fuente":               "Banco Central de Chile — si3.bcentral.cl",
             "fecha_actualizacion":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
