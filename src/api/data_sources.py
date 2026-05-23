@@ -53,10 +53,13 @@ _CREDENCIALES_INSTRUCCIONES = (
 # Constantes reguladas — fuente: Superintendencia de Pensiones
 #
 # Actualizacion manual requerida. Fuentes:
-#   Comisiones AFP : https://www.spensiones.cl/apps/loadEstadisticas/genEstadAFP.php
-#   Rentabilidades : https://www.spensiones.cl/apps/rentabilidad/getRentabilidad.php
-#   PBS / PGU      : Decretos Supremos MIDESO (Diario Oficial)
-#   Tope imponible : Art. 16 DL 3.500 (reajustado anualmente en UF)
+#   Comisiones AFP   : https://www.spensiones.cl/apps/loadEstadisticas/genEstadAFP.php
+#   Rentabilidades   : https://www.spensiones.cl/apps/rentabilidad/getRentabilidad.php
+#   PBS / PGU        : Decretos Supremos MIDESO (Diario Oficial)
+#   Tope imponible   : Art. 16 DL 3.500 (reajustado anualmente en UF)
+#   Sueldo minimo    : Ministerio del Trabajo y Prevision Social
+#                      https://www.mintrab.gob.cl/remuneraciones/
+#                      Valor vigente al 1 de agosto de cada año (Ley 21.248 y sucesoras)
 #
 # Ultima revision: mayo 2025
 # ---------------------------------------------------------------------------
@@ -97,6 +100,23 @@ _PBS_HISTORICA: Dict[int, int] = {
 }
 
 _TOPE_IMPONIBLE_UF: float = 84.7
+
+# Sueldo minimo nominal vigente al 1 de agosto de cada ano (CLP)
+# Fuente: Ministerio del Trabajo — https://www.mintrab.gob.cl/remuneraciones/
+# Ley 21.248 establecio hoja de ruta 2020-2024 hacia $500.000
+_SUELDO_MINIMO_HISTORICO: Dict[int, int] = {
+    2025: 530_000,   # vigente agosto 2025 (ajuste IPC estimado — verificar DS)
+    2024: 510_000,   # vigente agosto 2024
+    2023: 500_000,   # vigente agosto 2023 (meta Ley 21.248 alcanzada)
+    2022: 400_000,   # vigente agosto 2022
+    2021: 337_000,   # vigente agosto 2021
+    2020: 326_500,   # vigente agosto 2020
+    2019: 301_000,   # vigente agosto 2019
+    2018: 288_000,   # vigente agosto 2018
+    2017: 270_000,   # vigente agosto 2017
+    2016: 250_000,   # vigente agosto 2016
+    2015: 241_000,   # vigente agosto 2015
+}
 
 
 class DataFetcher:
@@ -301,6 +321,24 @@ class DataFetcher:
         ano = datetime.now().year
         return _PBS_HISTORICA.get(ano, max(_PBS_HISTORICA.values()))
 
+    def obtener_sueldo_minimo(self, ano: int | None = None) -> int:
+        """Sueldo minimo nominal vigente (Ministerio del Trabajo — actualizacion manual).
+
+        El BCCh no publica esta serie via API. Valor fijado por ley cada agosto.
+
+        Args:
+            ano: Ano consultado. Si None, usa el ano actual.
+
+        Returns:
+            Sueldo minimo en CLP.
+        """
+        ano = ano or datetime.now().year
+        return _SUELDO_MINIMO_HISTORICO.get(ano, max(_SUELDO_MINIMO_HISTORICO.values()))
+
+    def obtener_sueldo_minimo_historico(self) -> Dict[int, int]:
+        """Serie historica completa del sueldo minimo nominal (CLP)."""
+        return dict(_SUELDO_MINIMO_HISTORICO)
+
     def obtener_tope_imponible(self, en_uf: bool = True) -> float:
         """Tope imponible (Art. 16 DL 3.500).
 
@@ -336,6 +374,7 @@ class DataFetcher:
             "pbs":                  self.obtener_pension_basica_solidaria(),
             "tope_imponible_uf":    self.obtener_tope_imponible(en_uf=True),
             "tope_imponible_clp":   self.obtener_tope_imponible(en_uf=False),
+            "sueldo_minimo":        self.obtener_sueldo_minimo(),
             "fuente":               "Banco Central de Chile — si3.bcentral.cl",
             "fecha_actualizacion":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
