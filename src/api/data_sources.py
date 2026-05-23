@@ -1,42 +1,69 @@
 """
 Cliente de datos macroeconomicos para el simulador de pensiones.
 
-Consume APIs publicas chilenas (mindicador.cl) para obtener la UF,
-el IPC mensual y el sueldo minimo en tiempo real. Los datos de AFP
-(comisiones, rentabilidades) no tienen API publica confiable y se
-mantienen como constantes auditadas con su fuente documentada.
+Fuente exclusiva: API REST del Banco Central de Chile (si3.bcentral.cl).
 
-Cache:
-    Los resultados se cachean en memoria por sesion para evitar
-    llamadas repetidas a la API durante la misma ejecucion.
-    En produccion con multiples usuarios se recomienda Redis o
-    un cache persistente externo.
+Credenciales requeridas (registro gratuito):
+    https://si3.bcentral.cl/siete/secure/cuadros/home.aspx
+
+Variables de entorno:
+    BCENTRAL_USER  — correo de registro
+    BCENTRAL_PASS  — contrasena de la cuenta
+
+Datos sin endpoint publico en BCCh:
+    Comisiones AFP, rentabilidades por fondo y PBS son valores regulados
+    por la Superintendencia de Pensiones. Se mantienen como constantes
+    auditadas con fuente oficial documentada y deben actualizarse manualmente.
+    Fuente: https://www.spensiones.cl
 """
 
 import logging
-from datetime import datetime
-from typing import Dict, List, Optional
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constantes reguladas sin API publica disponible
+# Configuracion API Banco Central de Chile
+# ---------------------------------------------------------------------------
+
+_BCENTRAL_BASE = "https://si3.bcentral.cl/SieteRestWS/SieteRestWS.ashx"
+_TIMEOUT = 10  # segundos
+
+# Series BCCh — verificar vigencia en si3.bcentral.cl/siete/secure/cuadros/home.aspx
+_SERIES: Dict[str, str] = {
+    "uf":            "F073.UFF.PRE.Z.D",      # UF, valor diario
+    "ipc":           "F074.IPC.VAR.Z.M.T",    # IPC, variacion mensual (%)
+    "sueldo_minimo": "F054.SMA.SMN.Z.M.TF.V", # Sueldo minimo nominal mensual
+}
+
+_CREDENCIALES_INSTRUCCIONES = (
+    "\nCredenciales del Banco Central de Chile no configuradas.\n"
+    "Pasos:\n"
+    "  1. Registrese gratis en https://si3.bcentral.cl/siete/secure/cuadros/home.aspx\n"
+    "  2. Exporte las siguientes variables de entorno antes de iniciar la aplicacion:\n"
+    "       export BCENTRAL_USER='su_correo@ejemplo.com'\n"
+    "       export BCENTRAL_PASS='su_contrasena'\n"
+    "  3. En Windows use 'set' en lugar de 'export'.\n"
+)
+
+# ---------------------------------------------------------------------------
+# Constantes reguladas — fuente: Superintendencia de Pensiones
 #
-# La Superintendencia de Pensiones (SP) publica estos datos en su sitio web
-# pero no expone un endpoint JSON de consumo publico y gratuito.
-# Fuente oficial para actualizacion manual:
-#   Comisiones:      https://www.spensiones.cl/apps/loadEstadisticas/genEstadAFP.php
-#   Rentabilidades:  https://www.spensiones.cl/apps/rentabilidad/getRentabilidad.php
-#   PBS:             https://www.bcn.cl/leychile (Decretos Supremos anuales)
+# Actualizacion manual requerida. Fuentes:
+#   Comisiones AFP : https://www.spensiones.cl/apps/loadEstadisticas/genEstadAFP.php
+#   Rentabilidades : https://www.spensiones.cl/apps/rentabilidad/getRentabilidad.php
+#   PBS / PGU      : Decretos Supremos MIDESO (Diario Oficial)
+#   Tope imponible : Art. 16 DL 3.500 (reajustado anualmente en UF)
 #
-# Estos valores DEBEN revisarse y actualizarse cuando cambie la regulacion.
-# Ultima revision: mayo 2025.
+# Ultima revision: mayo 2025
 # ---------------------------------------------------------------------------
 
 _COMISIONES_AFP: Dict[str, float] = {
-    "Capital":   1.44,  # % sobre remuneracion imponible
+    "Capital":   1.44,
     "Cuprum":    1.44,
     "Habitat":   1.27,
     "Modelo":    0.58,
@@ -45,8 +72,6 @@ _COMISIONES_AFP: Dict[str, float] = {
     "Uno":       0.49,
 }
 
-# Rentabilidad nominal promedio 10 anos por tipo de fondo
-# Fuente: SP Pensiones — serie historica 2014-2024
 _RENTABILIDADES_FONDO: Dict[str, float] = {
     "A": 6.8,
     "B": 6.2,
@@ -55,18 +80,14 @@ _RENTABILIDADES_FONDO: Dict[str, float] = {
     "E": 3.2,
 }
 
-# Volatilidad anual estimada (desviacion estandar) por tipo de fondo
-# Fuente: calculo propio sobre serie historica SP Pensiones
 _VOLATILIDAD_FONDO: Dict[str, float] = {
     "A": 12.0,
-    "B": 9.0,
-    "C": 6.0,
-    "D": 4.0,
-    "E": 2.0,
+    "B":  9.0,
+    "C":  6.0,
+    "D":  4.0,
+    "E":  2.0,
 }
 
-# Pension Basica Solidaria por ano
-# Fuente: Decretos Supremos MIDESO / Ley 21.563 (PGU)
 _PBS_HISTORICA: Dict[int, int] = {
     2025: 225_975,
     2024: 214_296,
@@ -76,203 +97,249 @@ _PBS_HISTORICA: Dict[int, int] = {
     2020: 177_849,
 }
 
-# Tope imponible (Art. 16 DL 3.500 — reajustado anualmente)
 _TOPE_IMPONIBLE_UF: float = 84.7
-
-# Fallback sueldo minimo si la API no responde
-_SUELDO_MINIMO_FALLBACK: int = 500_000
-
-# Fallback inflacion anual INE si la API de IPC no responde
-# Fuente: INE — Indice de Precios al Consumidor, variacion anual
-_INFLACION_FALLBACK: Dict[int, float] = {
-    2024: 4.5,
-    2023: 7.6,
-    2022: 12.8,
-    2021: 7.2,
-    2020: 3.0,
-    2019: 2.3,
-    2018: 2.3,
-    2017: 2.2,
-    2016: 2.7,
-    2015: 4.4,
-}
 
 
 class DataFetcher:
-    """Cliente de datos macroeconomicos desde fuentes publicas chilenas.
+    """Cliente exclusivo del API REST del Banco Central de Chile.
 
-    Metodos publicos principales:
-        obtener_datos_completos() -> Dict   (punto de entrada unico para la UI)
-        obtener_uf_actual()       -> float
-        obtener_inflacion_anual() -> Dict[int, float]
-        obtener_inflacion_promedio(anos) -> float
+    Lanza EnvironmentError si las credenciales no estan configuradas.
+    Lanza requests.HTTPError o ValueError si la API retorna un error.
+    No usa fuentes alternativas ni valores estaticos para datos de mercado.
     """
 
-    _URL_BASE = "https://mindicador.cl/api"
-    _TIMEOUT = 6  # segundos
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._cache: Dict[str, object] = {}
+        self._bcentral_user = os.environ.get("BCENTRAL_USER", "")
+        self._bcentral_pass = os.environ.get("BCENTRAL_PASS", "")
 
     # ------------------------------------------------------------------
-    # API publica — mindicador.cl
+    # UF
     # ------------------------------------------------------------------
 
     def obtener_uf_actual(self) -> float:
-        """Valor de la UF del dia desde mindicador.cl.
+        """Valor de la UF del dia desde BCCh (serie F073.UFF.PRE.Z.D).
 
         Returns:
-            UF en CLP. Fallback: 37.500 si la API no responde.
+            UF en CLP.
+
+        Raises:
+            EnvironmentError: Si las credenciales no estan configuradas.
+            ValueError: Si la serie no retorna datos validos.
+            requests.HTTPError: Si la API retorna un error HTTP.
         """
         clave = f"uf_{datetime.now().date()}"
         if clave in self._cache:
-            return self._cache[clave]
+            return self._cache[clave]  # type: ignore[return-value]
 
-        try:
-            data = self._get("uf")
-            valor = float(data["serie"][0]["valor"])
-            self._cache[clave] = valor
-            return valor
-        except Exception as exc:
-            logger.warning("No se pudo obtener la UF: %s", exc)
-            return 37_500.0
+        self._verificar_credenciales()
+
+        hoy = datetime.now().date()
+        ayer = hoy - timedelta(days=3)
+        params = {
+            "user":       self._bcentral_user,
+            "pass":       self._bcentral_pass,
+            "function":   "GetSeries",
+            "timeseries": _SERIES["uf"],
+            "startdate":  ayer.strftime("%Y-%m-%d"),
+            "enddate":    hoy.strftime("%Y-%m-%d"),
+            "format":     "json",
+        }
+        data = self._get_bcentral(params)
+        series = data["Series"]["Obs"]
+        if not series:
+            raise ValueError("BCCh no retorno observaciones para la serie UF.")
+        ultimo = sorted(series, key=lambda x: x["indexDateString"], reverse=True)[0]
+        valor = float(ultimo["value"].replace(",", "."))
+        logger.info("UF obtenida desde BCCh: %.2f", valor)
+        self._cache[clave] = valor
+        return valor
+
+    # ------------------------------------------------------------------
+    # Inflacion (IPC)
+    # ------------------------------------------------------------------
 
     def obtener_inflacion_anual(self, anos: int = 10) -> Dict[int, float]:
-        """Inflacion anual calculada a partir del IPC mensual de la API.
+        """Inflacion anual compuesta calculada desde el IPC mensual BCCh.
 
-        Descarga la serie mensual del IPC (variacion porcentual mensual)
-        y computa la inflacion anual compuesta para cada año:
-            inf_anual = prod(1 + ipc_m/100 for m in year) - 1
+        Fuente: serie F074.IPC.VAR.Z.M.T
+
+        Formula: inf_anual_t = prod(1 + ipc_mes/100 for mes in t) - 1
 
         Args:
-            anos: Numero de anos hacia atras a incluir.
+            anos: Ventana historica en anos.
 
         Returns:
-            Dict {año: inflacion_anual_porcentaje}.
-            Fallback historico si la API no responde.
+            Dict {ano: inflacion_anual_porcentaje}.
+
+        Raises:
+            EnvironmentError: Si las credenciales no estan configuradas.
+            ValueError: Si la serie no retorna datos suficientes.
+            requests.HTTPError: Si la API retorna un error HTTP.
         """
         clave = f"inflacion_anual_{anos}"
         if clave in self._cache:
-            return self._cache[clave]
+            return self._cache[clave]  # type: ignore[return-value]
 
-        try:
-            data = self._get("ipc")
-            serie = data.get("serie", [])
-            if not serie:
-                raise ValueError("Serie IPC vacia.")
+        serie_mensual = self._ipc_mensual_desde_bcentral(anos)
+        resultado = self._calcular_inflacion_anual(serie_mensual)
 
-            # Agrupar variaciones mensuales por ano
-            variaciones_por_ano: Dict[int, List[float]] = {}
-            for entrada in serie:
-                fecha_str = entrada.get("fecha", "")
-                valor = float(entrada.get("valor", 0))
-                ano = int(fecha_str[:4])
-                variaciones_por_ano.setdefault(ano, []).append(valor)
+        if not resultado:
+            raise ValueError(
+                f"No hay datos de IPC suficientes para los ultimos {anos} anos."
+            )
 
-            # Inflacion anual compuesta para cada ano con al menos 12 meses
-            ano_actual = datetime.now().year
-            resultado: Dict[int, float] = {}
-            for ano in range(ano_actual - anos, ano_actual + 1):
-                meses = variaciones_por_ano.get(ano, [])
-                if len(meses) >= 12:
-                    factor = 1.0
-                    for m in meses:
-                        factor *= 1.0 + m / 100.0
-                    resultado[ano] = round((factor - 1.0) * 100.0, 2)
-                elif meses:
-                    # Ano en curso: anualizar los meses disponibles
-                    factor = 1.0
-                    for m in meses:
-                        factor *= 1.0 + m / 100.0
-                    n_meses = len(meses)
-                    anualizado = ((factor ** (12.0 / n_meses)) - 1.0) * 100.0
-                    resultado[ano] = round(anualizado, 2)
+        self._cache[clave] = resultado
+        return resultado
 
-            if resultado:
-                self._cache[clave] = resultado
-                return resultado
+    def _ipc_mensual_desde_bcentral(self, anos: int) -> Dict[str, float]:
+        """Descarga variaciones mensuales del IPC desde BCCh.
 
-        except Exception as exc:
-            logger.warning("No se pudo calcular inflacion desde API: %s", exc)
+        Returns:
+            Dict {YYYY-MM: variacion_porcentual_mensual}.
 
-        # Fallback: valores historicos INE conocidos
-        return self._inflacion_fallback(anos)
+        Raises:
+            EnvironmentError: Si las credenciales no estan configuradas.
+            ValueError: Si la respuesta no contiene datos validos.
+            requests.HTTPError: Si la API retorna un error HTTP.
+        """
+        self._verificar_credenciales()
+
+        inicio = (datetime.now() - timedelta(days=anos * 366)).strftime("%Y-%m-%d")
+        fin = datetime.now().strftime("%Y-%m-%d")
+        params = {
+            "user":       self._bcentral_user,
+            "pass":       self._bcentral_pass,
+            "function":   "GetSeries",
+            "timeseries": _SERIES["ipc"],
+            "startdate":  inicio,
+            "enddate":    fin,
+            "format":     "json",
+        }
+        data = self._get_bcentral(params)
+        serie = data["Series"]["Obs"]
+
+        resultado: Dict[str, float] = {}
+        for entry in serie:
+            fecha = entry["indexDateString"][:7]  # YYYY-MM
+            valor_str = entry["value"].replace(",", ".")
+            if valor_str not in ("", "N/E"):
+                resultado[fecha] = float(valor_str)
+
+        if not resultado:
+            raise ValueError("BCCh no retorno observaciones validas para la serie IPC.")
+
+        logger.info("IPC mensual obtenido desde BCCh: %d registros.", len(resultado))
+        return resultado
+
+    @staticmethod
+    def _calcular_inflacion_anual(serie_mensual: Dict[str, float]) -> Dict[int, float]:
+        """Agrupa variaciones mensuales por ano y calcula inflacion compuesta."""
+        por_ano: Dict[int, List[float]] = {}
+        for fecha_mes, variacion in serie_mensual.items():
+            ano = int(fecha_mes[:4])
+            por_ano.setdefault(ano, []).append(variacion)
+
+        resultado: Dict[int, float] = {}
+        ano_actual = datetime.now().year
+        for ano, meses in por_ano.items():
+            if len(meses) >= 12:
+                factor = 1.0
+                for m in meses:
+                    factor *= 1.0 + m / 100.0
+                resultado[ano] = round((factor - 1.0) * 100.0, 2)
+            elif len(meses) >= 3 and ano == ano_actual:
+                factor = 1.0
+                for m in meses:
+                    factor *= 1.0 + m / 100.0
+                anualizado = ((factor ** (12.0 / len(meses))) - 1.0) * 100.0
+                resultado[ano] = round(anualizado, 2)
+
+        return resultado
 
     def obtener_inflacion_promedio(self, anos: int = 5) -> float:
-        """Media aritmetica de la inflacion anual de los ultimos N anos.
+        """Media aritmetica de la inflacion anual de los ultimos N anos completos.
 
         Args:
-            anos: Ventana de calculo (default 5 anos).
+            anos: Ventana de calculo.
 
         Returns:
-            Promedio en puntos porcentuales, redondeado a 1 decimal.
+            Promedio en puntos porcentuales.
+
+        Raises:
+            EnvironmentError: Si las credenciales no estan configuradas.
+            ValueError: Si no hay datos suficientes.
         """
-        historico = self.obtener_inflacion_anual(anos)
-        if not historico:
-            return 3.5
-
+        historico = self.obtener_inflacion_anual(anos + 1)
         ano_actual = datetime.now().year
-        valores = [
-            v for a, v in historico.items()
-            if ano_actual - anos <= a < ano_actual
-        ]
+        valores = [v for a, v in historico.items() if ano_actual - anos <= a < ano_actual]
         if not valores:
-            return 3.5
-
+            raise ValueError(
+                f"No hay datos de inflacion para los ultimos {anos} anos completos."
+            )
         return round(sum(valores) / len(valores), 1)
 
+    # ------------------------------------------------------------------
+    # Sueldo minimo
+    # ------------------------------------------------------------------
+
     def obtener_sueldo_minimo(self) -> float:
-        """Sueldo minimo vigente desde mindicador.cl.
+        """Sueldo minimo vigente desde BCCh (serie F054.SMA.SMN.Z.M.TF.V).
 
         Returns:
-            Sueldo minimo en CLP. Fallback: 500.000 si la API falla.
+            Sueldo minimo en CLP.
+
+        Raises:
+            EnvironmentError: Si las credenciales no estan configuradas.
+            ValueError: Si la serie no retorna datos validos.
+            requests.HTTPError: Si la API retorna un error HTTP.
         """
         clave = "sueldo_minimo"
         if clave in self._cache:
-            return self._cache[clave]
+            return self._cache[clave]  # type: ignore[return-value]
 
-        try:
-            data = self._get("sueldo_minimo")
-            valor = float(data["serie"][0]["valor"])
-            self._cache[clave] = valor
-            return valor
-        except Exception as exc:
-            logger.warning("No se pudo obtener sueldo minimo: %s", exc)
-            return _SUELDO_MINIMO_FALLBACK
+        self._verificar_credenciales()
+
+        hoy = datetime.now().date()
+        hace_un_ano = hoy - timedelta(days=365)
+        params = {
+            "user":       self._bcentral_user,
+            "pass":       self._bcentral_pass,
+            "function":   "GetSeries",
+            "timeseries": _SERIES["sueldo_minimo"],
+            "startdate":  hace_un_ano.strftime("%Y-%m-%d"),
+            "enddate":    hoy.strftime("%Y-%m-%d"),
+            "format":     "json",
+        }
+        data = self._get_bcentral(params)
+        serie = data["Series"]["Obs"]
+        if not serie:
+            raise ValueError("BCCh no retorno observaciones para la serie sueldo minimo.")
+
+        ultimo = sorted(serie, key=lambda x: x["indexDateString"], reverse=True)[0]
+        valor = float(ultimo["value"].replace(",", "."))
+        logger.info("Sueldo minimo obtenido desde BCCh: %.0f CLP", valor)
+        self._cache[clave] = valor
+        return valor
 
     # ------------------------------------------------------------------
-    # Datos regulados (constantes auditadas)
+    # Datos regulados (constantes auditadas — fuente SP Pensiones)
     # ------------------------------------------------------------------
 
     def obtener_comisiones_afp(self) -> Dict[str, float]:
-        """Comisiones AFP vigentes (SP Pensiones).
-
-        Returns:
-            Dict {nombre_afp: comision_sobre_remuneracion_porcentaje}.
-        """
+        """Comisiones AFP vigentes (Superintendencia de Pensiones — actualizacion manual)."""
         return dict(_COMISIONES_AFP)
 
     def obtener_rentabilidades_afp(self, fondo: str = "C") -> Dict[str, float]:
-        """Rentabilidad y volatilidad historica por tipo de fondo.
-
-        Args:
-            fondo: Letra del fondo (A–E).
-
-        Returns:
-            Dict con rentabilidad_promedio_10a y volatilidad_estimada.
-        """
+        """Rentabilidad y volatilidad historica por tipo de fondo (SP Pensiones)."""
         return {
-            "fondo": fondo,
+            "fondo":                     fondo,
             "rentabilidad_promedio_10a": _RENTABILIDADES_FONDO.get(fondo, 5.0),
-            "volatilidad_estimada": _VOLATILIDAD_FONDO.get(fondo, 6.0),
+            "volatilidad_estimada":      _VOLATILIDAD_FONDO.get(fondo, 6.0),
         }
 
     def obtener_pension_basica_solidaria(self) -> int:
-        """PBS vigente segun Decreto Supremo mas reciente.
-
-        Returns:
-            PBS en CLP.
-        """
+        """PBS / PGU vigente segun Decreto Supremo mas reciente."""
         ano = datetime.now().year
         return _PBS_HISTORICA.get(ano, max(_PBS_HISTORICA.values()))
 
@@ -280,73 +347,67 @@ class DataFetcher:
         """Tope imponible (Art. 16 DL 3.500).
 
         Args:
-            en_uf: True retorna en UF, False en CLP.
-
-        Returns:
-            Tope imponible en la unidad solicitada.
+            en_uf: Si True retorna el tope en UF; si False, en CLP.
         """
         if en_uf:
             return _TOPE_IMPONIBLE_UF
         return _TOPE_IMPONIBLE_UF * self.obtener_uf_actual()
 
     # ------------------------------------------------------------------
-    # Punto de entrada unico para la interfaz
+    # Punto de entrada unico
     # ------------------------------------------------------------------
 
     def obtener_datos_completos(self) -> Dict:
-        """Agrega todos los indicadores necesarios para la UI.
+        """Agrega todos los indicadores en una sola llamada.
 
         Returns:
             Dict con uf, inflacion_anual, inflacion_promedio, comisiones_afp,
-            rentabilidades_fondos, pbs, tope_imponible_uf, tope_imponible_clp,
-            sueldo_minimo y fecha_actualizacion.
+            rentabilidades_fondos, pbs, topes, sueldo_minimo y fecha.
+
+        Raises:
+            EnvironmentError: Si las credenciales BCCh no estan configuradas.
         """
         return {
-            "uf": self.obtener_uf_actual(),
-            "inflacion_anual": self.obtener_inflacion_anual(10),
-            "inflacion_promedio": self.obtener_inflacion_promedio(5),
-            "comisiones_afp": self.obtener_comisiones_afp(),
+            "uf":                  self.obtener_uf_actual(),
+            "inflacion_anual":     self.obtener_inflacion_anual(10),
+            "inflacion_promedio":  self.obtener_inflacion_promedio(5),
+            "comisiones_afp":      self.obtener_comisiones_afp(),
             "rentabilidades_fondos": {
                 f: self.obtener_rentabilidades_afp(f) for f in ("A", "B", "C", "D", "E")
             },
-            "pbs": self.obtener_pension_basica_solidaria(),
-            "tope_imponible_uf": self.obtener_tope_imponible(en_uf=True),
-            "tope_imponible_clp": self.obtener_tope_imponible(en_uf=False),
-            "sueldo_minimo": self.obtener_sueldo_minimo(),
-            "fecha_actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "pbs":                  self.obtener_pension_basica_solidaria(),
+            "tope_imponible_uf":    self.obtener_tope_imponible(en_uf=True),
+            "tope_imponible_clp":   self.obtener_tope_imponible(en_uf=False),
+            "sueldo_minimo":        self.obtener_sueldo_minimo(),
+            "fuente":               "Banco Central de Chile — si3.bcentral.cl",
+            "fecha_actualizacion":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     # ------------------------------------------------------------------
     # Utilidades internas
     # ------------------------------------------------------------------
 
-    def _get(self, indicador: str) -> Dict:
-        """GET a mindicador.cl/<indicador> con timeout.
+    def _verificar_credenciales(self) -> None:
+        """Lanza EnvironmentError si las credenciales BCCh no estan configuradas."""
+        if not (self._bcentral_user and self._bcentral_pass):
+            raise EnvironmentError(_CREDENCIALES_INSTRUCCIONES)
 
-        Args:
-            indicador: Codigo del indicador (uf, ipc, sueldo_minimo, etc.).
-
-        Returns:
-            JSON deserializado como dict.
+    def _get_bcentral(self, params: Dict) -> Dict:
+        """Ejecuta una llamada GET al API del BCCh y retorna el JSON validado.
 
         Raises:
-            requests.HTTPError: Si el servidor responde con error HTTP.
-            ValueError: Si la respuesta no contiene datos utiles.
+            requests.HTTPError: Si el servidor retorna un codigo de error.
+            ValueError: Si la respuesta no contiene la clave 'Series'.
         """
-        url = f"{self._URL_BASE}/{indicador}"
-        response = requests.get(url, timeout=self._TIMEOUT)
+        response = requests.get(_BCENTRAL_BASE, params=params, timeout=_TIMEOUT)
         response.raise_for_status()
-        data = response.json()
-        if "serie" not in data or not data["serie"]:
-            raise ValueError(f"Respuesta sin datos para '{indicador}'.")
+        data: Dict = response.json()
+        if "Series" not in data:
+            raise ValueError(
+                f"Respuesta inesperada del BCCh. Claves recibidas: {list(data.keys())}"
+            )
         return data
 
-    @staticmethod
-    def _inflacion_fallback(anos: int) -> Dict[int, float]:
-        """Inflacion anual INE usada si la API de IPC no responde."""
-        ano_actual = datetime.now().year
-        return {a: v for a, v in _INFLACION_FALLBACK.items() if a >= ano_actual - anos}
 
-
-# Instancia global compartida por todos los modulos
+# Instancia global compartida
 data_fetcher = DataFetcher()
