@@ -1,25 +1,54 @@
 """
-Motor Principal de Cálculo de Pensiones
-Simulador profesional con inflación, valor presente, y análisis avanzado
+Motor de calculo del sistema de pensiones chileno (AFP).
+
+Implementa la proyeccion actuarial año a año del saldo acumulado,
+el calculo de pension bajo modalidades de Retiro Programado y Renta
+Vitalicia, y un conjunto de metricas financieras avanzadas.
+
+Arquitectura:
+    PensionCalculator  -- clase principal (stateless, thread-safe)
+        calcular_pension_completa()   -> Dict con todos los resultados
+        _simular_acumulacion()        -> calculo vectorizado del saldo
+        _distribuir_lagunas()         -> asignacion de periodos sin cotizacion
 """
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
+
 from .financial_metrics import (
-    calcular_vpn, calcular_tir, calcular_rentabilidad_real,
-    calcular_valor_presente_pension, calcular_brecha_previsional
+    calcular_vpn,
+    calcular_tir,
+    calcular_rentabilidad_real,
+    calcular_valor_presente_pension,
+    calcular_pension_retiro_programado,
+    calcular_brecha_previsional,
+    calcular_duracion_macaulay,
+    calcular_dv01_pension,
+    deflactar_serie,
+    clp_a_uf,
 )
 
 
 class PensionCalculator:
-    """Calculadora profesional de pensiones con métricas avanzadas."""
+    """Calculadora actuarial de pensiones del sistema AFP chileno.
 
-    def __init__(self):
-        """Inicializa la calculadora con parámetros por defecto."""
-        self.TOPE_IMPONIBLE = 84.7  # UF (actualizable)
-        self.PENSION_BASICA_SOLIDARIA = 214_296  # CLP (2024)
-        self.APORTE_PREVISIONAL_SOLIDARIO_MAX = 214_296
+    Todos los parametros de porcentaje se reciben en puntos porcentuales
+    (ej: 10.0 para 10 %) y se convierten internamente a decimales. El
+    resultado se expresa en pesos chilenos nominales y reales (pesos
+    constantes del año de calculo).
+
+    Constants:
+        TOPE_IMPONIBLE_UF: Tope imponible vigente en UF (Ley 19.728).
+        PBS_CLP: Pension Basica Solidaria 2024 en CLP.
+        FACTOR_RENTA_VITALICIA: Porcentaje estimado de conversion RP->RV.
+        TASA_RETIRO_DESCUENTO: Tasa de descuento real para calculo de PMT.
+    """
+
+    TOPE_IMPONIBLE_UF: float = 84.7
+    PBS_CLP: int = 214_296
+    FACTOR_RENTA_VITALICIA: float = 0.92
+    TASA_RETIRO_DESCUENTO: float = 0.03
 
     def calcular_pension_completa(
         self,
@@ -36,269 +65,294 @@ class PensionCalculator:
         inflacion_esperada: float,
         anos_lagunas: int,
         distribucion_lagunas: str,
-        valor_uf: float = 37000,
+        valor_uf: float = 37_500.0,
     ) -> Dict:
-        """
-        Calcula la pensión con todas las métricas profesionales.
+        """Proyeccion completa de pension con metricas financieras avanzadas.
+
+        Ejecuta la simulacion año a año con capitalización compuesta y
+        calcula el conjunto de indicadores necesario para un analisis
+        previsional profesional.
 
         Args:
-            edad_actual: Edad actual del cotizante
-            edad_jubilacion: Edad de jubilación
-            esperanza_vida: Esperanza de vida
-            ingreso_mensual: Ingreso mensual imponible (CLP)
-            aumento_salarial_anual: Aumento anual del sueldo (%)
-            cotizacion_obligatoria: Cotización obligatoria (%)
-            comision_afp: Comisión AFP (%)
-            aporte_empleador: Aporte del empleador (%)
-            cotizacion_voluntaria: Cotización voluntaria adicional (%)
-            rentabilidad_nominal: Rentabilidad esperada anual (%)
-            inflacion_esperada: Inflación esperada anual (%)
-            anos_lagunas: Años sin cotización
-            distribucion_lagunas: Distribución de lagunas
-            valor_uf: Valor actual de la UF
+            edad_actual: Edad actual del cotizante (anos).
+            edad_jubilacion: Edad objetivo de jubilacion (anos).
+            esperanza_vida: Esperanza de vida estimada (anos).
+            ingreso_mensual: Remuneracion mensual imponible en CLP.
+            aumento_salarial_anual: Incremento anual del sueldo (pp).
+            cotizacion_obligatoria: Tasa de cotizacion obligatoria (pp); min 10.
+            comision_afp: Comision de la AFP sobre remuneracion imponible (pp).
+            aporte_empleador: Aporte adicional del empleador (pp).
+            cotizacion_voluntaria: APV u otro ahorro voluntario (pp).
+            rentabilidad_nominal: Rentabilidad nominal anual esperada del fondo (pp).
+            inflacion_esperada: Inflacion anual esperada (pp).
+            anos_lagunas: Anos sin cotizacion (periodos de cesantia u otro).
+            distribucion_lagunas: Patron temporal de lagunas.
+                Opciones: 'Aleatorio', 'Inicio de carrera',
+                          'Mitad de carrera', 'Final de carrera'.
+            valor_uf: Valor vigente de la UF en CLP.
 
         Returns:
-            Dict con todos los resultados y métricas
+            Diccionario con resultados, metricas financieras y DataFrame anual.
+            Incluye la clave 'error' solo ante parametros invalidos.
         """
-        # Convertir porcentajes a decimales
-        aumento_salarial = aumento_salarial_anual / 100
-        cotizacion_total = (cotizacion_obligatoria + cotizacion_voluntaria) / 100
-        comision = comision_afp / 100
-        aporte_emp = aporte_empleador / 100
-        rent_nominal = rentabilidad_nominal / 100
-        inflacion = inflacion_esperada / 100
+        anos_acumulacion = edad_jubilacion - edad_actual
+        anos_retiro = esperanza_vida - edad_jubilacion
 
-        # Calcular rentabilidad real
-        rentabilidad_real = calcular_rentabilidad_real(rent_nominal, inflacion)
+        if anos_acumulacion <= 0:
+            return self._error("La edad de jubilacion debe ser mayor a la edad actual.")
+        if anos_retiro <= 0:
+            return self._error("La esperanza de vida debe superar la edad de jubilacion.")
 
-        # Años de cotización
-        anos_cotizacion = edad_jubilacion - edad_actual
-        if anos_cotizacion <= 0:
-            return self._resultado_error("Edad de jubilación debe ser mayor a edad actual")
+        # Conversion a decimales
+        r_nominal = rentabilidad_nominal / 100.0
+        r_inflacion = inflacion_esperada / 100.0
+        r_real = calcular_rentabilidad_real(r_nominal, r_inflacion)
+        cot_total = (cotizacion_obligatoria + cotizacion_voluntaria) / 100.0
+        comision = comision_afp / 100.0
+        emp_contrib = aporte_empleador / 100.0
+        aumento = aumento_salarial_anual / 100.0
+        tope_clp = self.TOPE_IMPONIBLE_UF * valor_uf
 
-        # Generar simulación año por año
-        simulacion = self._generar_simulacion_anual(
-            anos_cotizacion=anos_cotizacion,
+        # Simulacion año a año
+        df = self._simular_acumulacion(
+            anos_acumulacion=anos_acumulacion,
             edad_inicial=edad_actual,
             ingreso_inicial=ingreso_mensual,
-            aumento_salarial=aumento_salarial,
-            cotizacion_total=cotizacion_total,
+            aumento_salarial=aumento,
+            cot_total=cot_total,
             comision=comision,
-            aporte_empleador=aporte_emp,
-            rentabilidad_nominal=rent_nominal,
-            rentabilidad_real=rentabilidad_real,
+            emp_contrib=emp_contrib,
+            r_nominal=r_nominal,
+            r_inflacion=r_inflacion,
             anos_lagunas=anos_lagunas,
             distribucion_lagunas=distribucion_lagunas,
-            tope_imponible_clp=self.TOPE_IMPONIBLE * valor_uf
+            tope_clp=tope_clp,
         )
 
-        # Calcular pensiones
-        saldo_final_nominal = simulacion['saldo_nominal'].iloc[-1]
-        saldo_final_real = simulacion['saldo_real'].iloc[-1]
-        ultimo_sueldo = simulacion['ingreso_mensual'].iloc[-1]
+        saldo_nominal = float(df["saldo_nominal"].iloc[-1])
+        saldo_real = float(df["saldo_real"].iloc[-1])
+        ultimo_sueldo = float(df["ingreso_mensual"].iloc[-1])
+        meses_retiro = anos_retiro * 12
 
-        anos_pension = esperanza_vida - edad_jubilacion
-        if anos_pension <= 0:
-            return self._resultado_error("Esperanza de vida debe ser mayor a edad de jubilación")
+        # Pension RP con formula de anualidad (tasa real de retiro)
+        pension_rp_nominal = calcular_pension_retiro_programado(
+            saldo_nominal, meses_retiro, self.TASA_RETIRO_DESCUENTO
+        )
+        pension_rp_real = calcular_pension_retiro_programado(
+            saldo_real, meses_retiro, self.TASA_RETIRO_DESCUENTO
+        )
 
-        # Pensión en Retiro Programado
-        pension_rp_nominal = saldo_final_nominal / (anos_pension * 12)
-        pension_rp_real = saldo_final_real / (anos_pension * 12)
-
-        # Pensión en Renta Vitalicia (92% del RP típicamente)
-        factor_rv = 0.92
-        pension_rv_nominal = pension_rp_nominal * factor_rv
-        pension_rv_real = pension_rp_real * factor_rv
+        # Pension RV
+        pension_rv_nominal = pension_rp_nominal * self.FACTOR_RENTA_VITALICIA
+        pension_rv_real = pension_rp_real * self.FACTOR_RENTA_VITALICIA
 
         # Tasas de reemplazo
-        tasa_reemplazo_rp_nominal = (pension_rp_nominal / ultimo_sueldo) * 100
-        tasa_reemplazo_rv_nominal = (pension_rv_nominal / ultimo_sueldo) * 100
-
-        # Calcular tasa de reemplazo REAL (ajustada por inflación)
-        sueldo_real_inicio = ingreso_mensual
-        sueldo_real_final = ultimo_sueldo / ((1 + inflacion) ** anos_cotizacion)
-        pension_real_jubilacion = pension_rp_real
-
-        tasa_reemplazo_real = (pension_real_jubilacion / sueldo_real_final) * 100
-
-        # Métricas financieras avanzadas
-        flujos_cotizaciones = simulacion['cotizacion_neta_anual'].tolist()
-        vpn_cotizaciones = calcular_vpn(flujos_cotizaciones, rentabilidad_real)
-        tir_cotizaciones = calcular_tir(flujos_cotizaciones)
-
-        # Valor presente de la pensión
-        vp_pension_rp = calcular_valor_presente_pension(
-            pension_rp_nominal, anos_pension, rentabilidad_real, inflacion
+        tasa_rp = pension_rp_nominal / ultimo_sueldo * 100.0 if ultimo_sueldo else 0.0
+        tasa_rv = pension_rv_nominal / ultimo_sueldo * 100.0 if ultimo_sueldo else 0.0
+        sueldo_real_inicio = ultimo_sueldo / (1.0 + r_inflacion) ** anos_acumulacion
+        tasa_real = (
+            pension_rp_real / sueldo_real_inicio * 100.0 if sueldo_real_inicio else 0.0
         )
 
-        # Calcular brecha previsional (objetivo 70% del sueldo)
+        # Metricas financieras
+        flujos = df["cotizacion_neta_anual"].tolist()
+        vpn = calcular_vpn(flujos, r_real)
+        tir = calcular_tir(flujos, valor_terminal=saldo_nominal)
+
+        vp_pension = calcular_valor_presente_pension(
+            pension_rp_nominal, anos_retiro, r_real, r_inflacion
+        )
+        duracion = calcular_duracion_macaulay(meses_retiro, self.TASA_RETIRO_DESCUENTO)
+        dv01 = calcular_dv01_pension(saldo_nominal, meses_retiro, self.TASA_RETIRO_DESCUENTO)
+
+        # Brecha previsional (objetivo OCDE: 70 % del ultimo sueldo)
         pension_objetivo = ultimo_sueldo * 0.70
         brecha = calcular_brecha_previsional(
             pension_rp_nominal,
             pension_objetivo,
-            max(anos_cotizacion, 1),
-            rent_nominal
+            anos_acumulacion,
+            r_nominal,
+            anos_retiro,
         )
 
-        # Pensión Básica Solidaria (PBS) si aplica
-        pension_final_rp = max(pension_rp_nominal, self.PENSION_BASICA_SOLIDARIA)
-        pension_final_rv = max(pension_rv_nominal, self.PENSION_BASICA_SOLIDARIA)
+        # Piso PBS
+        pension_rp_con_pbs = max(pension_rp_nominal, self.PBS_CLP)
+        pension_rv_con_pbs = max(pension_rv_nominal, self.PBS_CLP)
 
         return {
-            # Resultados principales
-            'saldo_final_nominal': saldo_final_nominal,
-            'saldo_final_real': saldo_final_real,
-            'pension_rp_nominal': pension_rp_nominal,
-            'pension_rp_real': pension_rp_real,
-            'pension_rv_nominal': pension_rv_nominal,
-            'pension_rv_real': pension_rv_real,
-            'pension_rp_con_pbs': pension_final_rp,
-            'pension_rv_con_pbs': pension_final_rv,
-
+            # Saldos
+            "saldo_final_nominal": saldo_nominal,
+            "saldo_final_real": saldo_real,
+            "saldo_final_uf": clp_a_uf(saldo_nominal, valor_uf),
+            # Pensiones
+            "pension_rp_nominal": pension_rp_nominal,
+            "pension_rp_real": pension_rp_real,
+            "pension_rv_nominal": pension_rv_nominal,
+            "pension_rv_real": pension_rv_real,
+            "pension_rp_con_pbs": pension_rp_con_pbs,
+            "pension_rv_con_pbs": pension_rv_con_pbs,
             # Tasas de reemplazo
-            'tasa_reemplazo_rp': tasa_reemplazo_rp_nominal,
-            'tasa_reemplazo_rv': tasa_reemplazo_rv_nominal,
-            'tasa_reemplazo_real': tasa_reemplazo_real,
-
-            # Información del cotizante
-            'ultimo_sueldo': ultimo_sueldo,
-            'anos_cotizacion': anos_cotizacion,
-            'anos_pension': anos_pension,
-            'anos_lagunas_efectivos': anos_lagunas,
-
-            # Métricas financieras
-            'vpn_cotizaciones': vpn_cotizaciones,
-            'tir_cotizaciones': tir_cotizaciones * 100,  # Como porcentaje
-            'rentabilidad_real': rentabilidad_real * 100,
-            'rentabilidad_nominal': rent_nominal * 100,
-            'vp_pension_total': vp_pension_rp,
-
+            "tasa_reemplazo_rp": tasa_rp,
+            "tasa_reemplazo_rv": tasa_rv,
+            "tasa_reemplazo_real": tasa_real,
+            # Parametros derivados
+            "ultimo_sueldo": ultimo_sueldo,
+            "anos_cotizacion": anos_acumulacion,
+            "anos_retiro": anos_retiro,
+            "anos_lagunas_efectivos": anos_lagunas,
+            "anos_cotizacion_efectivos": anos_acumulacion - anos_lagunas,
+            # Metricas financieras
+            "vpn_cotizaciones": vpn,
+            "tir_cotizaciones": tir * 100.0,
+            "rentabilidad_real": r_real * 100.0,
+            "rentabilidad_nominal": r_nominal * 100.0,
+            "vp_pension_total": vp_pension,
+            # ALM
+            "duracion_macaulay_anos": duracion,
+            "dv01_clp": dv01,
             # Brecha previsional
-            'brecha_previsional': brecha,
-
-            # DataFrame de simulación
-            'simulacion_anual': simulacion,
-
+            "brecha_previsional": brecha,
+            # Simulacion tabular
+            "simulacion_anual": df,
             # Metadata
-            'factor_renta_vitalicia': factor_rv,
-            'inflacion_esperada': inflacion * 100,
-            'valor_uf_usado': valor_uf,
+            "factor_renta_vitalicia": self.FACTOR_RENTA_VITALICIA,
+            "inflacion_esperada": r_inflacion * 100.0,
+            "valor_uf_usado": valor_uf,
+            "tasa_descuento_retiro": self.TASA_RETIRO_DESCUENTO * 100.0,
         }
 
-    def _generar_simulacion_anual(
+    # ------------------------------------------------------------------
+    # Simulacion interna
+    # ------------------------------------------------------------------
+
+    def _simular_acumulacion(
         self,
-        anos_cotizacion: int,
+        anos_acumulacion: int,
         edad_inicial: int,
         ingreso_inicial: float,
         aumento_salarial: float,
-        cotizacion_total: float,
+        cot_total: float,
         comision: float,
-        aporte_empleador: float,
-        rentabilidad_nominal: float,
-        rentabilidad_real: float,
+        emp_contrib: float,
+        r_nominal: float,
+        r_inflacion: float,
         anos_lagunas: int,
         distribucion_lagunas: str,
-        tope_imponible_clp: float
+        tope_clp: float,
     ) -> pd.DataFrame:
-        """Genera la simulación año por año."""
+        """Proyeccion año a año usando listas pre-asignadas (O(n) eficiente).
 
-        # Inicializar DataFrame
-        df = pd.DataFrame({
-            'ano': range(1, anos_cotizacion + 1),
-            'edad': range(edad_inicial, edad_inicial + anos_cotizacion),
-            'ingreso_mensual': 0.0,
-            'ingreso_imponible': 0.0,
-            'cotizacion_anual': 0.0,
-            'aporte_empleador_anual': 0.0,
-            'comision_anual': 0.0,
-            'cotizacion_neta_anual': 0.0,
-            'rentabilidad_nominal_anual': 0.0,
-            'rentabilidad_real_anual': 0.0,
-            'saldo_nominal': 0.0,
-            'saldo_real': 0.0,
-            'tiene_laguna': False
+        Calcula el saldo nominal acumulando cotizaciones netas con
+        capitalizacion compuesta. El saldo real se obtiene deflactando
+        el saldo nominal al nivel de precios del año base.
+
+        Returns:
+            DataFrame con columnas: ano, edad, ingreso_mensual,
+            ingreso_imponible, cotizacion_anual, aporte_empleador_anual,
+            comision_anual, cotizacion_neta_anual, rentabilidad_nominal_anual,
+            saldo_nominal, saldo_real, tiene_laguna.
+        """
+        n = anos_acumulacion
+        lagunas = set(self._distribuir_lagunas(n, anos_lagunas, distribucion_lagunas))
+
+        # Pre-asignacion con listas
+        edades = list(range(edad_inicial, edad_inicial + n))
+        ingresos = np.zeros(n)
+        imponibles = np.zeros(n)
+        cotizaciones = np.zeros(n)
+        aportes_emp = np.zeros(n)
+        comisiones = np.zeros(n)
+        netos = np.zeros(n)
+        rentabilidades = np.zeros(n)
+        saldos_nominales = np.zeros(n)
+        tiene_laguna = np.zeros(n, dtype=bool)
+
+        saldo = 0.0
+        ingreso = ingreso_inicial
+
+        for i in range(n):
+            if i > 0:
+                ingreso = ingresos[i - 1] * (1.0 + aumento_salarial)
+
+            imponible = min(ingreso, tope_clp)
+            ingresos[i] = ingreso
+            imponibles[i] = imponible
+            tiene_laguna[i] = i in lagunas
+
+            if not tiene_laguna[i]:
+                cot_anual = imponible * cot_total * 12.0
+                emp_anual = imponible * emp_contrib * 12.0
+                com_anual = imponible * comision * 12.0
+            else:
+                cot_anual = emp_anual = com_anual = 0.0
+
+            neto = cot_anual + emp_anual - com_anual
+            rent = saldo * r_nominal
+            saldo = saldo + rent + neto
+
+            cotizaciones[i] = cot_anual
+            aportes_emp[i] = emp_anual
+            comisiones[i] = com_anual
+            netos[i] = neto
+            rentabilidades[i] = rent
+            saldos_nominales[i] = saldo
+
+        # Deflactar saldo nominal para obtener saldo real (pesos constantes año 0)
+        indices = (1.0 + r_inflacion) ** np.arange(1, n + 1)
+        saldos_reales = saldos_nominales / indices
+
+        return pd.DataFrame({
+            "ano": np.arange(1, n + 1),
+            "edad": edades,
+            "ingreso_mensual": ingresos,
+            "ingreso_imponible": imponibles,
+            "cotizacion_anual": cotizaciones,
+            "aporte_empleador_anual": aportes_emp,
+            "comision_anual": comisiones,
+            "cotizacion_neta_anual": netos,
+            "rentabilidad_nominal_anual": rentabilidades,
+            "saldo_nominal": saldos_nominales,
+            "saldo_real": saldos_reales,
+            "tiene_laguna": tiene_laguna,
         })
 
-        # Determinar años con lagunas
-        lagunas_indices = self._calcular_lagunas(anos_cotizacion, anos_lagunas, distribucion_lagunas)
-        df.loc[lagunas_indices, 'tiene_laguna'] = True
+    def _distribuir_lagunas(
+        self, anos_totales: int, anos_lagunas: int, distribucion: str
+    ) -> List[int]:
+        """Indices de anos con laguna previsional segun patron elegido.
 
-        # Calcular evolución año por año
-        saldo_nominal = 0.0
-        saldo_real = 0.0
+        Args:
+            anos_totales: Duracion total del periodo de acumulacion.
+            anos_lagunas: Cantidad de anos sin cotizacion.
+            distribucion: Patron de distribucion.
 
-        for i in range(anos_cotizacion):
-            # Calcular ingreso con aumento anual
-            if i == 0:
-                ingreso = ingreso_inicial
-            else:
-                ingreso = df.loc[i-1, 'ingreso_mensual'] * (1 + aumento_salarial)
-
-            # Aplicar tope imponible
-            ingreso_imponible = min(ingreso, tope_imponible_clp)
-
-            df.loc[i, 'ingreso_mensual'] = ingreso
-            df.loc[i, 'ingreso_imponible'] = ingreso_imponible
-
-            # Si hay laguna, no hay cotización
-            if df.loc[i, 'tiene_laguna']:
-                cotizacion_anual = 0
-                aporte_empleador_anual = 0
-                comision_anual = 0
-            else:
-                cotizacion_mensual = ingreso_imponible * cotizacion_total
-                aporte_emp_mensual = ingreso_imponible * aporte_empleador
-                comision_mensual = ingreso_imponible * comision
-
-                cotizacion_anual = cotizacion_mensual * 12
-                aporte_empleador_anual = aporte_emp_mensual * 12
-                comision_anual = comision_mensual * 12
-
-            cotizacion_neta = cotizacion_anual + aporte_empleador_anual - comision_anual
-
-            df.loc[i, 'cotizacion_anual'] = cotizacion_anual
-            df.loc[i, 'aporte_empleador_anual'] = aporte_empleador_anual
-            df.loc[i, 'comision_anual'] = comision_anual
-            df.loc[i, 'cotizacion_neta_anual'] = cotizacion_neta
-
-            # Actualizar saldo con rentabilidad
-            rentabilidad_nominal_anual = saldo_nominal * rentabilidad_nominal
-            rentabilidad_real_anual = saldo_real * rentabilidad_real
-
-            saldo_nominal = saldo_nominal + rentabilidad_nominal_anual + cotizacion_neta
-            saldo_real = saldo_real + rentabilidad_real_anual + cotizacion_neta
-
-            df.loc[i, 'rentabilidad_nominal_anual'] = rentabilidad_nominal_anual
-            df.loc[i, 'rentabilidad_real_anual'] = rentabilidad_real_anual
-            df.loc[i, 'saldo_nominal'] = saldo_nominal
-            df.loc[i, 'saldo_real'] = saldo_real
-
-        return df
-
-    def _calcular_lagunas(self, anos_totales: int, anos_lagunas: int, distribucion: str) -> List[int]:
-        """Calcula qué años tienen lagunas previsionales."""
+        Returns:
+            Lista de indices (0-based) con laguna.
+        """
         if anos_lagunas <= 0 or anos_lagunas > anos_totales:
             return []
 
         if distribucion == "Aleatorio":
-            return np.random.choice(anos_totales, anos_lagunas, replace=False).tolist()
-        elif distribucion == "Inicio de carrera":
+            rng = np.random.default_rng()
+            return rng.choice(anos_totales, anos_lagunas, replace=False).tolist()
+        if distribucion == "Inicio de carrera":
             return list(range(min(anos_lagunas, anos_totales)))
-        elif distribucion == "Mitad de carrera":
+        if distribucion == "Mitad de carrera":
             inicio = max(0, (anos_totales // 2) - (anos_lagunas // 2))
-            fin = min(anos_totales, inicio + anos_lagunas)
-            return list(range(inicio, fin))
-        elif distribucion == "Final de carrera":
-            inicio = max(0, anos_totales - anos_lagunas)
-            return list(range(inicio, anos_totales))
-        else:
-            return []
+            return list(range(inicio, min(anos_totales, inicio + anos_lagunas)))
+        if distribucion == "Final de carrera":
+            return list(range(max(0, anos_totales - anos_lagunas), anos_totales))
+        return []
 
-    def _resultado_error(self, mensaje: str) -> Dict:
-        """Retorna un diccionario de error."""
+    # ------------------------------------------------------------------
+    # Utilidades
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _error(mensaje: str) -> Dict:
         return {
-            'error': True,
-            'mensaje': mensaje,
-            'saldo_final_nominal': 0,
-            'pension_rp_nominal': 0
+            "error": True,
+            "mensaje": mensaje,
+            "saldo_final_nominal": 0.0,
+            "pension_rp_nominal": 0.0,
         }

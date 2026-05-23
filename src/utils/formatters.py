@@ -1,159 +1,127 @@
 """
-Utilidades de Formateo
-Formateo de números, monedas y texto para Chile
+Utilidades de formateo numerico para el sistema previsional chileno.
+
+Implementa las convenciones locales: separador de miles con punto,
+separador decimal con coma, prefijo peso chileno y unidades UF.
 """
 
 from typing import Union
 
+Number = Union[int, float]
 
-def formato_clp(valor: Union[int, float], decimales: int = 0) -> str:
-    """
-    Formatea un valor como moneda chilena.
+
+def formato_clp(valor: Number, decimales: int = 0) -> str:
+    """Formatea un valor monetario en pesos chilenos.
 
     Args:
-        valor: Valor numérico
-        decimales: Número de decimales (default 0)
+        valor: Monto numerico.
+        decimales: Digitos decimales (default 0 para pesos enteros).
 
     Returns:
-        String formateado (ej: "$1.234.567")
+        Cadena con formato chileno, ej. "$1.234.567".
     """
     if valor is None:
         return "$0"
-
     try:
         if decimales == 0:
-            return f"${int(valor):,}".replace(",", ".")
-        else:
-            # Formatear con decimales
-            formatted = f"${valor:,.{decimales}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            return formatted
-    except:
+            return f"${int(round(valor)):,}".replace(",", ".")
+        formatted = f"${valor:,.{decimales}f}"
+        return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
         return "$0"
 
 
-def formato_porcentaje(valor: Union[int, float], decimales: int = 1) -> str:
-    """
-    Formatea un valor como porcentaje.
+def formato_porcentaje(valor: Number, decimales: int = 1) -> str:
+    """Formatea un valor como porcentaje con convencion chilena.
 
     Args:
-        valor: Valor numérico (ej: 5.5 para 5.5%)
-        decimales: Número de decimales
+        valor: Porcentaje en puntos (ej. 5.5 para 5,5 %).
+        decimales: Digitos decimales.
 
     Returns:
-        String formateado (ej: "5,5%")
+        Cadena, ej. "5,5 %".
     """
     if valor is None:
-        return "0%"
-
+        return "0,0 %"
     try:
-        formatted = f"{valor:.{decimales}f}%".replace(".", ",")
-        return formatted
-    except:
-        return "0%"
+        return f"{valor:.{decimales}f} %".replace(".", ",")
+    except (TypeError, ValueError):
+        return "0,0 %"
 
 
-def formato_uf(valor: Union[int, float], decimales: int = 2) -> str:
-    """
-    Formatea un valor en UF.
+def formato_uf(valor: Number, decimales: int = 2) -> str:
+    """Formatea un valor en Unidades de Fomento.
 
     Args:
-        valor: Valor numérico
-        decimales: Número de decimales
+        valor: Monto en UF.
+        decimales: Digitos decimales.
 
     Returns:
-        String formateado (ej: "UF 1.234,56")
+        Cadena, ej. "UF 1.234,56".
     """
     if valor is None:
         return "UF 0,00"
-
     try:
-        formatted = f"UF {valor:,.{decimales}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return formatted
-    except:
+        formatted = f"UF {valor:,.{decimales}f}"
+        return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
         return "UF 0,00"
 
 
-def formato_numero(valor: Union[int, float], decimales: int = 0) -> str:
-    """
-    Formatea un número con separadores de miles chilenos.
+def formato_numero(valor: Number, decimales: int = 0) -> str:
+    """Formatea un numero con separadores de miles chilenos.
 
     Args:
-        valor: Valor numérico
-        decimales: Número de decimales
+        valor: Numero a formatear.
+        decimales: Digitos decimales.
 
     Returns:
-        String formateado (ej: "1.234.567")
+        Cadena, ej. "1.234.567".
     """
     if valor is None:
         return "0"
-
     try:
         if decimales == 0:
-            return f"{int(valor):,}".replace(",", ".")
-        else:
-            formatted = f"{valor:,.{decimales}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            return formatted
-    except:
+            return f"{int(round(valor)):,}".replace(",", ".")
+        formatted = f"{valor:,.{decimales}f}"
+        return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
         return "0"
 
 
-def formato_abreviado(valor: Union[int, float]) -> str:
-    """
-    Formatea números grandes de forma abreviada.
+def formato_abreviado(valor: Number) -> str:
+    """Formatea valores grandes de forma abreviada (MM, M, K).
+
+    Util para etiquetas de graficos donde el espacio es limitado.
 
     Args:
-        valor: Valor numérico
+        valor: Monto numerico.
 
     Returns:
-        String formateado (ej: "1,2M", "350K")
+        Cadena abreviada, ej. "$1,2MM", "$350M".
     """
     if valor is None:
-        return "0"
-
+        return "$0"
     try:
-        abs_valor = abs(valor)
-
-        if abs_valor >= 1_000_000_000:
-            return f"${valor / 1_000_000_000:.1f}B".replace(".", ",")
-        elif abs_valor >= 1_000_000:
+        abs_v = abs(valor)
+        if abs_v >= 1_000_000_000:
+            return f"${valor / 1_000_000_000:.1f}MM".replace(".", ",")
+        if abs_v >= 1_000_000:
             return f"${valor / 1_000_000:.1f}M".replace(".", ",")
-        elif abs_valor >= 1_000:
-            return f"${valor / 1_000:.0f}K".replace(".", ",")
-        else:
-            return formato_clp(valor)
-    except:
+        if abs_v >= 1_000:
+            return f"${valor / 1_000:.0f}K"
+        return formato_clp(valor)
+    except (TypeError, ValueError):
         return "$0"
 
 
-def pluralizar(cantidad: int, singular: str, plural: str = None) -> str:
-    """
-    Retorna la forma singular o plural según la cantidad.
+def formato_anos(anos: int) -> str:
+    """Devuelve la representacion en texto del numero de años.
 
     Args:
-        cantidad: Número de elementos
-        singular: Forma singular
-        plural: Forma plural (si no se proporciona, añade 's')
+        anos: Numero entero de anos.
 
     Returns:
-        String con la forma correcta
+        Cadena gramaticalmente correcta en espanol.
     """
-    if plural is None:
-        plural = singular + "s"
-
-    return singular if cantidad == 1 else plural
-
-
-def tiempo_transcurrido(anos: int) -> str:
-    """
-    Formatea años en texto legible.
-
-    Args:
-        anos: Número de años
-
-    Returns:
-        String formateado (ej: "1 año", "25 años")
-    """
-    if anos == 1:
-        return "1 año"
-    else:
-        return f"{anos} años"
+    return "1 ano" if anos == 1 else f"{anos} anos"
