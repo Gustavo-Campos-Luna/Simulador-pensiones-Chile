@@ -101,21 +101,23 @@ _PBS_HISTORICA: Dict[int, int] = {
 
 _TOPE_IMPONIBLE_UF: float = 84.7
 
-# Sueldo minimo nominal vigente al 1 de agosto de cada ano (CLP)
-# Fuente: Ministerio del Trabajo — https://www.mintrab.gob.cl/remuneraciones/
-# Ley 21.248 establecio hoja de ruta 2020-2024 hacia $500.000
+# Sueldo minimo nominal: valor vigente al 31 de diciembre de cada ano (CLP)
+# Fuente: Biblioteca del Congreso Nacional — Ley Chile (leychile.bcn.cl)
+# Multiples reajustes dentro del ano; se usa el valor de mayor vigencia anual.
 _SUELDO_MINIMO_HISTORICO: Dict[int, int] = {
-    2025: 530_000,   # vigente agosto 2025 (ajuste IPC estimado — verificar DS)
-    2024: 510_000,   # vigente agosto 2024
-    2023: 500_000,   # vigente agosto 2023 (meta Ley 21.248 alcanzada)
-    2022: 400_000,   # vigente agosto 2022
-    2021: 337_000,   # vigente agosto 2021
-    2020: 326_500,   # vigente agosto 2020
-    2019: 301_000,   # vigente agosto 2019
-    2018: 288_000,   # vigente agosto 2018
-    2017: 270_000,   # vigente agosto 2017
-    2016: 250_000,   # vigente agosto 2016
-    2015: 241_000,   # vigente agosto 2015
+    2026: 539_000,   # desde 01-ene-2026 (Ley 21.751)
+    2025: 529_000,   # desde 01-may-2025 (Ley 21.578)
+    2024: 500_000,   # desde 01-jul-2024 (Ley 21.578)
+    2023: 460_000,   # desde 01-sep-2023 (Ley 21.456)
+    2022: 400_000,   # desde 01-ago-2022 (Ley 21.456)
+    2021: 337_000,   # desde 01-may-2021 (Ley 21.360)
+    2020: 326_500,   # desde 01-sep-2020 (Ley 21.283)
+    2019: 301_000,   # desde 01-mar-2019 (Ley 21.112)
+    2018: 288_000,   # desde 01-sep-2018 (Ley 21.112)
+    2017: 270_000,   # desde 01-jul-2017 (Ley 20.935)
+    2016: 257_500,   # desde 01-jul-2016 (Ley 20.935)
+    2015: 241_000,   # desde 01-jul-2015 (Ley 20.763)
+    2014: 225_000,   # desde 01-jul-2014 (Ley 20.689)
 }
 
 
